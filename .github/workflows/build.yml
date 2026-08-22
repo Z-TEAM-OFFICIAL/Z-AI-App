@@ -1,4 +1,4 @@
-name: Build and push APK
+name: Build APK (release, fallback to debug) and upload artifact
 
 on:
   push:
@@ -10,62 +10,128 @@ permissions:
 
 jobs:
   build:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-
+    env:
+      ANDROID_SDK_ROOT: /usr/local/android-sdk
     steps:
     - name: Checkout
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
-        persist-credentials: true
 
-    - name: Set up JDK
+    - name: Print project layout (for debugging)
+      run: |
+        echo "Root files:"
+        ls -la
+        echo "Find build files and wrappers:"
+        find . -maxdepth 4 -type f \( -name 'gradlew' -o -name 'build.gradle*' -o -name 'settings.gradle*' \) -print || true
+
+    - name: Make gradlew executable if present
+      run: |
+        if [ -f ./gradlew ]; then chmod +x ./gradlew; fi
+        # make any gradlew found under subdirs executable too
+        find . -type f -name gradlew -exec chmod +x {} \; || true
+
+    - name: Set up JDK 17
       uses: actions/setup-java@v4
       with:
         distribution: temurin
         java-version: 17
 
-    - name: Cache Gradle
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.gradle/caches
-          ~/.gradle/wrapper
-        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-        restore-keys: |
-          ${{ runner.os }}-gradle-
+    - name: Install Android SDK command-line tools and platforms
+      run: |
+        set -e
+        mkdir -p "${ANDROID_SDK_ROOT}/cmdline-tools"
+        cd /tmp
+        wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O cmdline-tools.zip
+        unzip -q cmdline-tools.zip -d "${ANDROID_SDK_ROOT}/cmdline-tools"
+        # Move to expected layout
+        mkdir -p "${ANDROID_SDK_ROOT}/cmdline-tools/latest"
+        mv "${ANDROID_SDK_ROOT}/cmdline-tools/cmdline-tools"/* "${ANDROID_SDK_ROOT}/cmdline-tools/latest/" || true
+        export PATH="$PATH:${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${ANDROID_SDK_ROOT}/platform-tools"
+        yes | sdkmanager --licenses || true
+        sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
-    - name: Build Release APK
-      run: ./gradlew assembleRelease --no-daemon --stacktrace
+    - name: Attempt release build (use wrapper if available, else gradle)
+      shell: bash
+      run: |
+        set -e
+        # Decide which gradle command to use
+        if [ -x ./gradlew ]; then
+          echo "Using gradlew at repo root"
+          GRADLE_CMD="./gradlew"
+        else
+          # Look for gradlew in subdirs
+          gw=$(find . -type f -name gradlew | head -n 1 || true)
+          if [ -n "$gw" ]; then
+            echo "Using gradlew found at $gw"
+            chmod +x "$gw"
+            GRADLE_CMD="$gw"
+          else
+            echo "No gradlew found. Will use system gradle via gradle wrapper action fallback."
+            GRADLE_CMD="gradle"
+          fi
+        fi
+
+        # Try release build. If it fails, do not stop the job here; fall back later.
+        set +e
+        if [ "$GRADLE_CMD" = "gradle" ]; then
+          # install gradle (system) if needed
+          if ! command -v gradle >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y gradle
+          fi
+          gradle :app:assembleRelease --no-daemon --stacktrace
+          RC=$?
+        else
+          $GRADLE_CMD :app:assembleRelease --no-daemon --stacktrace
+          RC=$?
+        fi
+        set -e
+
+        if [ $RC -ne 0 ]; then
+          echo "Release build failed (exit $RC). Falling back to debug build."
+          if [ "$GRADLE_CMD" = "gradle" ]; then
+            gradle :app:assembleDebug --no-daemon --stacktrace
+          else
+            $GRADLE_CMD :app:assembleDebug --no-daemon --stacktrace
+          fi
+        fi
 
     - name: Find APK and copy to ./build/z-ai-app.apk
       run: |
         mkdir -p build
-        if [ -f app/build/outputs/apk/release/app-release.apk ]; then
-          cp app/build/outputs/apk/release/app-release.apk build/z-ai-app.apk
-          echo "Copied app-release.apk"
+        # prefer release APK if present
+        apk=$(find . -type f -path "*/app/build/outputs/apk/*/*/*.apk" | grep -i release | head -n1 || true)
+        if [ -z "$apk" ]; then
+          apk=$(find . -type f -path "*/app/build/outputs/apk/*/*/*.apk" | head -n1 || true)
+        fi
+        if [ -n "$apk" ]; then
+          echo "Found APK: $apk"
+          cp "$apk" build/z-ai-app.apk
+          ls -lh build/z-ai-app.apk
         else
-          apk_path=$(find . -type f -name "*release*.apk" | head -n 1 || true)
-          if [ -n "$apk_path" ]; then
-            cp "$apk_path" build/z-ai-app.apk
-            echo "Copied $apk_path"
-          else
-            echo "No release APK found"
-            exit 1
-          fi
+          echo "No APK found."
+          exit 1
         fi
 
-    - name: Commit APK back to repo
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
-        git add build/z-ai-app.apk || true
-        if git diff --cached --quiet; then
-          echo "No changes to commit"
-          exit 0
-        fi
-        git commit -m "chore(ci): add built APK (z-ai-app.apk) [skip ci]"
-        git push origin HEAD:refs/heads/${{ github.ref_name }}
+    - name: Upload APK artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: z-ai-app-apk
+        path: build/z-ai-app.apk
+
+    # Optional: commit APK back into repo (uncomment if you really want this)
+    # - name: Commit APK back to repo
+    #   if: github.event_name != 'pull_request'
+    #   env:
+    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #   run: |
+    #     git config user.name "github-actions[bot]"
+    #     git config user.email "github-actions[bot]@users.noreply.github.com"
+    #     git add build/z-ai-app.apk || true
+    #     if git diff --cached --quiet; then
+    #       echo "No changes to commit"
+    #       exit 0
+    #     fi
+    #     git commit -m "chore(ci): add built APK (z-ai-app.apk) [skip ci]"
+    #     git push origin HEAD:refs/heads/${{ github.ref_name }}
