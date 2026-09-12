@@ -23,6 +23,7 @@ sealed class ZegaAction {
     data class LaunchApp(val appQuery: String) : ZegaAction()
     data class OpenBrowser(val url: String) : ZegaAction()
     object OpenVfs : ZegaAction()
+    data class SearchWeb(val query: String) : ZegaAction()
 }
 
 data class ZegaResponse(
@@ -151,6 +152,24 @@ class ZegaOfflineBrain {
                 intentType = "vfs",
                 action = ZegaAction.OpenVfs
             )
+        }
+
+        // 6. Search Tool Command Check
+        if (lower.startsWith("search for ") || lower.startsWith("search web for ") || lower.startsWith("google ") || lower.startsWith("look up ") || lower.startsWith("search ")) {
+            val q = input.trim()
+                .replace("search web for ", "", ignoreCase = true)
+                .replace("search for ", "", ignoreCase = true)
+                .replace("google ", "", ignoreCase = true)
+                .replace("look up ", "", ignoreCase = true)
+                .replace("search ", "", ignoreCase = true)
+                .trim()
+            if (q.isNotEmpty()) {
+                return ZegaResponse(
+                    replyText = "Searching the web for \"$q\"...",
+                    intentType = "search",
+                    action = ZegaAction.SearchWeb(q)
+                )
+            }
         }
 
         // Voice mode switching checks

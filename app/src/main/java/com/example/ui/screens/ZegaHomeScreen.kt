@@ -60,6 +60,7 @@ import com.example.ui.components.VeoStudioDialog
 import com.example.ui.components.LyriaStudioDialog
 import com.example.ui.components.VoiceWaveformVisualizer
 import com.example.ui.components.VfsExplorerDialog
+import com.example.ui.components.AiSearchToolDialog
 import com.example.ui.viewmodel.PendingToolPermission
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.AssistantState
@@ -108,6 +109,7 @@ fun ZegaHomeScreen(
     val pendingPermission by viewModel.pendingToolPermission.collectAsStateWithLifecycle()
     val browserUrl by viewModel.inAppBrowserUrl.collectAsStateWithLifecycle()
     val vfsOpen by viewModel.vfsDialogOpen.collectAsStateWithLifecycle()
+    val isAiSearchOpen by viewModel.isAiSearchDialogOpen.collectAsStateWithLifecycle()
     val currentModelTier by viewModel.currentModelTier.collectAsStateWithLifecycle()
     val ecoModeActive by viewModel.ecoModeActive.collectAsStateWithLifecycle()
 
@@ -385,6 +387,36 @@ fun ZegaHomeScreen(
                         }
                     }
 
+                    // AI Web Search Interactive Tool button
+                    IconButton(
+                        onClick = { viewModel.setAiSearchDialogOpen(true) },
+                        modifier = Modifier.testTag("open_ai_search_tool_button")
+                    ) {
+                        BadgedBox(
+                            badge = {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(3.dp))
+                                        .background(ZegaNeonCyan.copy(alpha = 0.25f))
+                                        .padding(horizontal = 3.dp, vertical = 0.5.dp)
+                                ) {
+                                    Text(
+                                        text = "SEARCH",
+                                        fontSize = 7.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = ZegaNeonCyan
+                                    )
+                                }
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Search,
+                                contentDescription = "AI Web Search Tool",
+                                tint = ZegaNeonCyan
+                            )
+                        }
+                    }
+
                     // Google Search Grounding Toggle
                     IconButton(
                         onClick = { viewModel.toggleSearchGrounding() },
@@ -554,12 +586,24 @@ fun ZegaHomeScreen(
                         .padding(horizontal = 12.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    IconButton(
+                        onClick = { viewModel.setAiSearchDialogOpen(true) },
+                        modifier = Modifier.testTag("quick_search_tool_icon_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Search,
+                            contentDescription = "Open AI Web Search",
+                            tint = ZegaNeonCyan,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
                     TextField(
                         value = keyboardInputText,
                         onValueChange = { keyboardInputText = it },
                         placeholder = {
                             Text(
-                                text = "Ask Z-AI anything offline...",
+                                text = "Ask Z-AI anything offline or search...",
                                 color = ZegaGrayText,
                                 fontSize = 14.sp
                             )
@@ -2281,6 +2325,17 @@ fun ZegaHomeScreen(
         VfsExplorerDialog(
             viewModel = viewModel,
             onDismiss = { viewModel.setVfsDialogOpen(false) }
+        )
+    }
+
+    // AI Web Search Tool Dialog
+    if (isAiSearchOpen) {
+        AiSearchToolDialog(
+            viewModel = viewModel,
+            onDismiss = { viewModel.setAiSearchDialogOpen(false) },
+            onOpenInBrowser = { url ->
+                viewModel.openInAppBrowser(url)
+            }
         )
     }
 }

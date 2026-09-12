@@ -32,6 +32,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.example.data.api.GoogleSearchScraper
+import com.example.data.api.GeminiApiClient
+import com.example.data.api.SearchGroundingResult
+import com.example.data.api.ScrapedResult
 
 import com.example.data.auth.AuthRepository
 import com.example.data.auth.AuthResult
@@ -114,6 +117,133 @@ class ZegaViewModel(
     // Power & Eco-Mode State
     private val _ecoModeActive = MutableStateFlow(false)
     val ecoModeActive: StateFlow<Boolean> = _ecoModeActive.asStateFlow()
+
+    // AI Web Search Tool States
+    private val _isAiSearchDialogOpen = MutableStateFlow(false)
+    val isAiSearchDialogOpen: StateFlow<Boolean> = _isAiSearchDialogOpen.asStateFlow()
+
+    private val _aiSearchQuery = MutableStateFlow("")
+    val aiSearchQuery: StateFlow<String> = _aiSearchQuery.asStateFlow()
+
+    private val _isAiSearching = MutableStateFlow(false)
+    val isAiSearching: StateFlow<Boolean> = _isAiSearching.asStateFlow()
+
+    private val _lastGroundingResult = MutableStateFlow<SearchGroundingResult?>(null)
+    val lastGroundingResult: StateFlow<SearchGroundingResult?> = _lastGroundingResult.asStateFlow()
+
+    private val _lastScrapedResults = MutableStateFlow<List<ScrapedResult>>(emptyList())
+    val lastScrapedResults: StateFlow<List<ScrapedResult>> = _lastScrapedResults.asStateFlow()
+
+    private val _searchHistory = MutableStateFlow<List<String>>(emptyList())
+    val searchHistory: StateFlow<List<String>> = _searchHistory.asStateFlow()
+
+    private val _isSearchGroundingMode = MutableStateFlow(true)
+    val isSearchGroundingMode: StateFlow<Boolean> = _isSearchGroundingMode.asStateFlow()
+
+    fun setAiSearchDialogOpen(open: Boolean) {
+        _isAiSearchDialogOpen.value = open
+    }
+
+    fun setSearchGroundingMode(useGrounding: Boolean) {
+        _isSearchGroundingMode.value = useGrounding
+    }
+
+    fun clearAiSearchResults() {
+        _lastGroundingResult.value = null
+        _lastScrapedResults.value = emptyList()
+        _aiSearchQuery.value = ""
+    }
+
+    fun executeAiSearch(query: String, context: Context) {
+        val trimmed = query.trim()
+        if (trimmed.isBlank()) return
+        _aiSearchQuery.value = trimmed
+        _isAiSearching.value = true
+
+        val currentHist = _searchHistory.value.toMutableList()
+        currentHist.remove(trimmed)
+        currentHist.add(0, trimmed)
+        _searchHistory.value = currentHist.take(15)
+
+        viewModelScope.launch {
+            try {
+                if (_isSearchGroundingMode.value) {
+                    val result = withContext(Dispatchers.IO) {
+                        GeminiApiClient.generateWithSearchGrounding(
+                            prompt = "Answer accurately using Google Search Grounding for: $trimmed"
+                        )
+                    }
+                    _lastGroundingResult.value = result
+                    if (result != null && result.replyText.isNotBlank()) {
+                        speakLocal("Search complete for $trimmed.")
+                    } else {
+                        val scraped = withContext(Dispatchers.IO) {
+                            GoogleSearchScraper.search(trimmed)
+                        }
+                        _lastScrapedResults.value = scraped
+                    }
+                } else {
+                    val scraped = withContext(Dispatchers.IO) {
+                        GoogleSearchScraper.search(trimmed)
+                    }
+                    _lastScrapedResults.value = scraped
+                    speakLocal("Fetched web results for $trimmed.")
+                }
+            } catch (e: Exception) {
+                Log.e("ZegaVM", "AI Search tool error: ${e.localizedMessage}")
+                val scraped = withContext(Dispatchers.IO) {
+                    GoogleSearchScraper.search(trimmed)
+                }
+                _lastScrapedResults.value = scraped
+            } finally {
+                _isAiSearching.value = false
+            }
+        }
+    }
+
+    fun addAiSearchAnswerToChat(query: String) {
+        val grounded = _lastGroundingResult.value
+        val scraped = _lastScrapedResults.value
+
+        val replyText: String
+        val intent: String
+        if (grounded != null && grounded.replyText.isNotBlank()) {
+            val sourcesSection = if (grounded.sources.isNotEmpty()) {
+                "\n\n**🌐 Live Google Search Sources:**\n" + grounded.sources.take(4).mapIndexed { idx, src ->
+                    "${idx + 1}. [${src.title}](${src.url})"
+                }.joinToString("\n")
+            } else ""
+            replyText = "${grounded.replyText}$sourcesSection"
+            intent = "grounded_search"
+        } else if (scraped.isNotEmpty()) {
+            val bulletList = scraped.take(4).mapIndexed { idx, res ->
+                "${idx + 1}. **${res.title}**\n${res.snippet}\nLink: ${res.link}"
+            }.joinToString("\n\n")
+            replyText = "Web Search Results for \"$query\":\n\n$bulletList"
+            intent = "search"
+        } else {
+            return
+        }
+
+        viewModelScope.launch {
+            repository.insertMessage(
+                ChatMessage(
+                    sender = "user",
+                    text = "Search: $query",
+                    isVoice = false,
+                    intentType = "search_query"
+                )
+            )
+            repository.insertMessage(
+                ChatMessage(
+                    sender = "zega",
+                    text = replyText,
+                    isVoice = false,
+                    intentType = intent
+                )
+            )
+        }
+    }
 
     fun openInAppBrowser(url: String) {
         val clean = if (url.startsWith("http://") || url.startsWith("https://")) url else "https://$url"
@@ -919,6 +1049,18 @@ class ZegaViewModel(
                     parsedIntent = "vfs"
                 }
 
+                // AI Web Search
+                if (cleanReply.contains("[SEARCH:")) {
+                    val regex = "\\[SEARCH:([^\\]]+)\\]".toRegex()
+                    val match = regex.find(cleanReply)
+                    if (match != null) {
+                        val searchQuery = match.groupValues[1].trim()
+                        cleanReply = cleanReply.replace(regex, "").trim()
+                        parsedAction = ZegaAction.SearchWeb(searchQuery)
+                        parsedIntent = "search"
+                    }
+                }
+
                 // Timer
                 if (cleanReply.contains("[TIMER:")) {
                     val regex = "\\[TIMER:(\\d+)\\]".toRegex()
@@ -1248,6 +1390,10 @@ class ZegaViewModel(
             is ZegaAction.OpenVfs -> {
                 setVfsDialogOpen(true)
             }
+            is ZegaAction.SearchWeb -> {
+                handleSearchQuery(action.query, context)
+                return
+            }
             ZegaAction.None -> { /* Do nothing */ }
         }
 
@@ -1272,7 +1418,7 @@ class ZegaViewModel(
         speakLocal(spokenText)
     }
 
-    private fun speakLocal(text: String) {
+    fun speakLocal(text: String) {
         _assistantState.value = AssistantState.SPEAKING
         ttsManager?.speak(
             text = text,
